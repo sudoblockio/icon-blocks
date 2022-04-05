@@ -10,7 +10,7 @@ on:
       - main
 
 jobs:
-  docker:
+  test:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -53,12 +53,21 @@ jobs:
       - name: Run integration tests
         run: cd tests && go test -v -covermode=atomic -coverprofile=coverage.out ./...
 
-#      - uses: codecov/codecov-action@v2
-#        with:
-#          token: ${{ secrets.CODECOV_TOKEN }}
-#          files: ./tests/coverage.out
-#          flags: integration
-#          fail_ci_if_error: true
+      - uses: codecov/codecov-action@v2
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./tests/coverage.out
+          flags: integration
+          fail_ci_if_error: true
+
+  docker:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.source.outputs.TAG }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
 
       - id: last
         uses: pozetroninc/github-action-get-latest-release@master
@@ -85,8 +94,7 @@ jobs:
           file: ./Dockerfile
           target: prod
           push: true
-          repository: sudoblock/icon-blocks-api
-          tags: latest, ${{ steps.source.outputs.TAG }}
+          tags: sudoblock/icon-blocks-api:latest, sudoblock/icon-blocks-api:${{ steps.source.outputs.TAG }}
 
       - name: Build and push (WORKER)
         uses: docker/build-push-action@v2
@@ -97,8 +105,22 @@ jobs:
           file: ./Dockerfile
           target: prod
           push: true
-          repository: sudoblock/icon-blocks-worker
-          tags: latest, ${{ steps.source.outputs.TAG }}
+          tags: sudoblock/icon-blocks-worker:latest, sudoblock/icon-blocks-worker:${{ steps.source.outputs.TAG }}
+
+  push_refs:
+    runs-on: ubuntu-latest
+    needs: docker
+    strategy:
+      matrix:
+        include:
+          - cluster: dev-lax
+            network_name: mainnet
+            network_version: v1
+          - cluster: dev-lax
+            network_name: sejong
+            network_version: v1
+
+    steps:
 
       - name: Checkout charts repo
         uses: actions/checkout@v2
@@ -108,14 +130,19 @@ jobs:
           path: charts
           token: ${{ secrets.ICON_CHARTS_PAT }}
 
+      - name: Git pull the latest
+        run: |
+          git pull
+        working-directory: charts
+
       - name: Update dev-lax mainnet deployment values file (API)
         uses: fjogeleit/yaml-update-action@master
         with:
           workDir: charts
           repository: sudoblockio/icon-charts
-          valueFile: 'deployments/dev-lax/mainnet/blocks/values.yaml'
+          valueFile: 'deployments/${{ matrix.cluster }}/${{ matrix.network_name }}-${{ matrix.network_version }}/blocks/values.yaml'
           propertyPath: 'api.image.tag'
-          value: ${{ steps.source.outputs.TAG }}
+          value: ${{needs.docker.outputs.tag}}
           branch: main
           createPR: 'false'
           updateFile: true
@@ -126,9 +153,9 @@ jobs:
         with:
           workDir: charts
           repository: sudoblockio/icon-charts
-          valueFile: 'deployments/dev-lax/mainnet/blocks/values.yaml'
+          valueFile: 'deployments/${{ matrix.cluster }}/${{ matrix.network_name }}-${{ matrix.network_version }}/blocks/values.yaml'
           propertyPath: 'worker.image.tag'
-          value: ${{ steps.source.outputs.TAG }}
+          value: ${{needs.docker.outputs.tag}}
           branch: main
           createPR: 'false'
           updateFile: true
@@ -143,6 +170,6 @@ jobs:
       - name: Commit all updates
         run: |
           git add -A
-          git commit -m "blocks dev deployment image versions to ${{ steps.source.outputs.TAG }}"
+          git commit -m "blocks ${{ matrix.cluster }}/${{ matrix.network_name }}-${{ matrix.network_version }} deployment image version to ${{needs.docker.outputs.tag}}"
           git push origin
         working-directory: charts
